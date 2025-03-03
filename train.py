@@ -1,3 +1,4 @@
+# filepath: /home/steven/code/llama_compression/train.py
 import os
 import glob
 import torch
@@ -5,37 +6,50 @@ import torch.nn as nn
 import torchvision.transforms as T
 from torch.utils.data import Dataset, DataLoader
 from PIL import Image
-import matplotlib.pyplot as plt
-
+from tqdm import tqdm
 from main import SafeLlamaPixelAR
+from PIL import ImageFile
 
-# ---------- 数据集定义 ----------
-class ImageFolderDataset(Dataset):
-    def __init__(self, root_dir, size=128, patch_size=16):
-        """
-        root_dir: 存放原始图像的文件夹
-        size:     将图像统一缩放为 size×size
-        patch_size: 用于切分小块
-        """
+# Allow loading partially corrupted / truncated images if possible
+ImageFile.LOAD_TRUNCATED_IMAGES = True
+
+# ---------- 增强数据集类 ----------
+class RobustImageDataset(Dataset):
+    def __init__(self, root_dir, size=256, patch_size=16):
         super().__init__()
         self.root_dir = root_dir
-        self.paths = sorted(glob.glob(os.path.join(root_dir, "*.jpg")))
         self.size = size
         self.patch_size = patch_size
+        self._init_paths()
+        
         self.transform = T.Compose([
             T.Resize((size, size)),
-            T.ToTensor(),               # 转为 [0,1]
-            T.Lambda(lambda x: x * 255)  # [0,255]
+            T.ToTensor(),
+            T.Lambda(lambda x: x * 255)
         ])
+
+    def _init_paths(self):
+        """动态加载路径并过滤损坏文件"""
+        self.paths = []
+        raw_paths = sorted(glob.glob(os.path.join(self.root_dir, "*.jpg")))
+        
+        # 预验证图像文件
+        # for path in tqdm(raw_paths, desc="Validating images"):
+        #     try:
+        #         with Image.open(path) as img:
+        #             img.verify()
+        #         self.paths.append(path)
+        #     except (IOError, OSError, Image.DecompressionBombError) as e:
+        #         print(f"Removing corrupted file: {path} ({str(e)})")
+        
+        # Since validation is commented out, just use all paths
+        self.paths = raw_paths
+        print(f"Found {len(self.paths)} image files")
 
     def __len__(self):
         return len(self.paths)
 
     def patchify(self, img_tensor):
-        """
-        将 [3, size, size] 切分为若干 [3, patch_size, patch_size] 小块。
-        返回形状: [num_patch, 3, patch_size, patch_size]
-        """
         c, h, w = img_tensor.shape
         patches = []
         for i in range(0, h, self.patch_size):
@@ -43,111 +57,151 @@ class ImageFolderDataset(Dataset):
                 patch = img_tensor[:, i:i+self.patch_size, j:j+self.patch_size]
                 patches.append(patch)
         return torch.stack(patches, dim=0)
+    
+    def random_patchify(self, img_tensor, num_patches=1):
+        """随机采样 16×16 patch，用于训练"""
+        import random
+        c, h, w = img_tensor.shape
+        patches = []
+        for _ in range(num_patches):
+            top = random.randint(0, h - self.patch_size)
+            left = random.randint(0, w - self.patch_size)
+            patch = img_tensor[:, top:top+self.patch_size, left:left+self.patch_size]
+            patches.append(patch)
+        return torch.stack(patches, dim=0)
 
     def __getitem__(self, idx):
+        """读取图像并随机采 16×16 patch，不可读则跳过。"""
         path = self.paths[idx]
-        img = Image.open(path).convert("RGB")
-        img_tensor = self.transform(img)   # [3, size, size]
-        patches = self.patchify(img_tensor)  # [num_patches, 3, patch_size, patch_size]
-        return patches, img_tensor  # 同时返回原图（用于后续的可视化）
+        try:
+            img = Image.open(path).convert("RGB")
+            img_tensor = self.transform(img)
+            # 使用随机采样函数
+            patches = self.random_patchify(img_tensor, num_patches=16)  
+            return patches, img_tensor
+        except Exception as e:
+            print(f"Error loading {path}: {str(e)}, skipping...")
+            # 跳过损坏样本
+            return self[(idx + 1) % len(self)]
 
-# ---------- 可视化函数 ----------
-def unpatchify(patches, original_size=(64, 64), patch_size=16):
-    """
-    将 [num_patches, 3, patch_size, patch_size] 小块还原为 [3, H, W]。
-    适用于能被 patch_size 整除的尺寸。
-    """
-    num_patches, c, _, _ = patches.shape
-    h, w = original_size
-    patches_per_row = w // patch_size
-    rows = []
-    for i in range(0, num_patches, patches_per_row):
-        row = patches[i: i + patches_per_row]
-        rows.append(torch.cat(list(row), dim=-1))
-    return torch.cat(rows, dim=-2)
-
-# ---------- 训练脚本 ----------
-def train_model():
-    # 参数设置
-    root_dir = "/home/steven/code/vqllama/data/Flickr30K/images"  # 数据集文件夹
-    batch_size = 1    # 每个样本为一张图（含多个 patch）
-    epochs = 3
-    lr = 1e-4
-    size = 64      # 图像尺寸
-    patch_size = 16
-
-    # 构建数据集和 DataLoader
-    dataset = ImageFolderDataset(root_dir, size=size, patch_size=patch_size)
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=True)
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    # 加载最新的模型，注意模型内部已冻结除 embedding 层（embed_tokens）外的所有参数
-    model = SafeLlamaPixelAR(model_path="./saved_model").to(device).bfloat16()
-    model.train()
-
-    # （可选）打印待训练参数数量
-    trainable_params = [p for p in model.parameters() if p.requires_grad]
-    print(f"Trainable parameters count: {sum(p.numel() for p in trainable_params)}")
-
-    optimizer = torch.optim.AdamW(trainable_params, lr=lr)
-
-    # 训练循环
-    for epoch in range(epochs):
+# ---------- 训练系统 ----------
+class TrainingSystem:
+    def __init__(self):
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.checkpoint_path = "training_checkpoint.pth"
+        
+        # 训练参数
+        self.root_dir = "/remote-home/wufeiyang/dataset/flickr30k/Images"
+        self.epochs = 10
+        self.lr = 1e-4
+        self.size = 256
+        self.patch_size = 16
+        self.batch_size_per_gpu = 1
+        
+        # 初始化组件
+        self._init_dataset()
+        self._init_model()
+        self._init_optimizer()
+        
+    def _init_dataset(self):
+        self.dataset = RobustImageDataset(
+            self.root_dir, 
+            size=self.size,
+            patch_size=self.patch_size
+        )
+        self.dataloader = DataLoader(
+            self.dataset,
+            batch_size=self.batch_size_per_gpu * torch.cuda.device_count(),
+            shuffle=True,
+            num_workers=4,
+            persistent_workers=True,
+            drop_last=True
+        )
+    
+    def _init_model(self):
+        # 基础模型
+        self.base_model = SafeLlamaPixelAR(
+            model_path="/remote-home/wufeiyang/saved_model"
+        )
+        
+        # 断点恢复
+        if os.path.exists(self.checkpoint_path):
+            checkpoint = torch.load(self.checkpoint_path, map_location="cpu")
+            self.base_model.load_state_dict(checkpoint["model_state"])
+            self.start_epoch = checkpoint["epoch"] + 1
+            self.best_loss = checkpoint["best_loss"]
+            print(f"Loaded checkpoint from epoch {self.start_epoch}, loss {self.best_loss:.4f}")
+        else:
+            self.start_epoch = 0
+            self.best_loss = float("inf")
+        
+        # 多GPU支持
+        if torch.cuda.device_count() >= 1:
+            self.model = nn.DataParallel(self.base_model.to(self.device))
+        self.model = self.model.bfloat16()
+    
+    def _init_optimizer(self):
+        self.optimizer = torch.optim.AdamW(
+            self.model.parameters(), 
+            lr=self.lr,
+            weight_decay=0.01
+        )
+        if os.path.exists(self.checkpoint_path):
+            checkpoint = torch.load(self.checkpoint_path)
+            self.optimizer.load_state_dict(checkpoint["optimizer_state"])
+    
+    def _save_checkpoint(self, epoch, avg_loss):
+        checkpoint = {
+            "epoch": epoch,
+            "model_state": self.base_model.state_dict(),
+            "optimizer_state": self.optimizer.state_dict(),
+            "best_loss": min(avg_loss, self.best_loss),
+        }
+        torch.save(checkpoint, self.checkpoint_path)
+    
+    def train_epoch(self, epoch):
+        self.model.train()
         total_loss = 0.0
-        steps = 0
-
-        for batch in dataloader:
-            # 每个 batch 返回 (patches, original_img)
-            # patches: [batch_size, num_patches, 3, patch_size, patch_size]
-            patches, _ = batch
+        
+        # 进度条
+        progress_bar = tqdm(self.dataloader, desc=f"Epoch {epoch+1}/{self.epochs}")
+        
+        for batch_idx, (patches, _) in enumerate(progress_bar):
+            # 数据准备
             b, n, c, ph, pw = patches.shape
-            # 将所有 patch 展平成 [b*n, 3, patch_size, patch_size]
-            input_patches = patches.view(b * n, c, ph, pw).to(device, dtype=torch.bfloat16)
-
-            optimizer.zero_grad()
+            input_patches = patches.view(b*n, c, ph, pw).to(self.device, dtype=torch.bfloat16)
+            
+            # 前向传播
+            self.optimizer.zero_grad()
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                logits, ce_loss = model(input_patches, None)
+                _, ce_loss = self.model(input_patches, None)
+                ce_loss = ce_loss.mean()
+            
+            # 反向传播
             ce_loss.backward()
-            optimizer.step()
-
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+            self.optimizer.step()
+            
+            # 记录损失
             total_loss += ce_loss.item()
-            steps += 1
-
-        avg_loss = total_loss / steps
-        print(f"[Epoch {epoch+1}/{epochs}] Avg CE loss (bpp): {avg_loss:.5f}")
-
-    # 保存训练后的模型参数
-    torch.save(model.state_dict(), "trained_llama_pixelar.pt")
-    print("Training done. Model saved to trained_llama_pixelar.pt")
-
-    # ---------- 可视化重建效果 ----------
-    model.eval()
-    with torch.no_grad():
-        # 随机取一张图进行测试
-        sample_patches, orig_img = dataset[0]  # sample_patches: [num_patches, 3, patch_size, patch_size]
-        input_patches = sample_patches.to(device, dtype=torch.bfloat16)
-        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-            logits, _ = model(input_patches, None)
-        # logits 的形状：[num_patches, seq_len, 256] 其中 seq_len = 3 * patch_size * patch_size
-        # 取 argmax 得到预测的 token 序列
-        pred_tokens = logits.argmax(dim=-1)  # [num_patches, 3*patch_size*patch_size]
-        # 将 token 序列重构为 [3, patch_size, patch_size]
-        pred_patches = pred_tokens.view(-1, 3, patch_size, patch_size).float().clamp(0, 255)
-        reconstructed_img = unpatchify(pred_patches.cpu(), original_size=(size, size), patch_size=patch_size)
-
-    # 可视化原图和重建图
-    plt.figure(figsize=(8, 4))
-    plt.subplot(1, 2, 1)
-    plt.imshow(orig_img.permute(1, 2, 0).byte().numpy())
-    plt.title("Original Image")
-    plt.axis("off")
-    plt.subplot(1, 2, 2)
-    plt.imshow(reconstructed_img.permute(1, 2, 0).byte().numpy())
-    plt.title("Reconstructed Image")
-    plt.axis("off")
-    plt.tight_layout()
-    plt.show()
-
+            progress_bar.set_postfix({
+                "loss": f"{total_loss/(batch_idx+1):.4f}",
+                "mem": f"{torch.cuda.max_memory_allocated()/1e9:.2f}GB"
+            })
+        
+        return total_loss / len(self.dataloader)
+    
+    def run(self):
+        for epoch in range(self.start_epoch, self.epochs):
+            avg_loss = self.train_epoch(epoch)
+            print(f"Epoch {epoch+1} | Avg Loss: {avg_loss:.4f}")
+            self._save_checkpoint(epoch, avg_loss)
+        
+        # 最终保存
+        torch.save(self.base_model.state_dict(), "final_model.pth")
 
 if __name__ == "__main__":
-    train_model()
+    # 可以尝试让 PyTorch 在 CUDA 中动态分配内存
+    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+    system = TrainingSystem()
+    system.run()
