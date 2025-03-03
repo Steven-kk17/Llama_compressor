@@ -1,2 +1,9 @@
-saved_model/
-downloaded_model/
+# Large model files
+*.pth
+
+# Python cache files
+__pycache__/
+*.pyc
+
+# Private keys and credentials
+key.txt*
