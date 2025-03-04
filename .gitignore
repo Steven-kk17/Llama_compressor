@@ -1,5 +1,8 @@
 # Large model files
 *.pth
+final_model.pth
+*.safetensors
+saved_model/
 
 # Python cache files
 __pycache__/
