@@ -108,7 +108,7 @@ class TrainingSystem:
         if os.path.exists(self.checkpoint_path):
             checkpoint = torch.load(self.checkpoint_path, map_location="cpu")
             self.model.module.load_state_dict(checkpoint["model_state"])  # use .module in DeepSpeed/Accelerate
-            self.optimizer.load_state_dict(checkpoint["optimizer_state"])
+            # 移除这行：self.optimizer.load_state_dict(checkpoint["optimizer_state"])
             self.start_epoch = checkpoint["epoch"] + 1
             self.best_loss = checkpoint["best_loss"]
             print(f"Loaded checkpoint from epoch {self.start_epoch}, loss {self.best_loss:.4f}")
