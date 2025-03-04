@@ -1,7 +1,8 @@
 # filepath: /home/steven/code/llama_compression/main.py
 import torch
 import torch.nn as nn
-from transformers import AutoModelForCausalLM, AutoConfig
+from transformers import LlamaModel, LlamaConfig
+import math
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")  # 如果GPU设备可以，则用GPU；否则用CPU设备
 
@@ -17,11 +18,11 @@ class SafeLlamaPixelAR(nn.Module):
     def __init__(self, model_path="./saved_model") -> None:
         super().__init__()
         # 1) 载入配置并将 vocab_size 改为 256
-        self.config = AutoConfig.from_pretrained(model_path)
+        self.config = LlamaConfig.from_pretrained(model_path)
         self.config.vocab_size = 256
 
         # 2) 载入 Llama 并忽略大小不匹配
-        self.llama = AutoModelForCausalLM.from_pretrained(
+        self.llama = LlamaModel.from_pretrained(
             model_path,
             config=self.config,
             torch_dtype=torch.bfloat16,
@@ -32,12 +33,10 @@ class SafeLlamaPixelAR(nn.Module):
         self.llama.resize_token_embeddings(256)
 
         # 3) 冻结 Llama 本体参数，但留出 embedding 部分供训练
-        for name, param in self.llama.named_parameters():
-            # 解冻 embed_tokens 层（部分名称可能依模型而异）
-            if "embed_tokens" in name:
-                param.requires_grad = True
-            else:
-                param.requires_grad = False
+        self.embeddings = self.llama.get_input_embeddings()
+        self.llama.set_input_embeddings(None)
+        for param in self.embeddings.parameters():
+            param.requires_grad = True
 
         # 新增的可学习 prob 层，将 hidden_size 映射至 256
         self.prob = nn.Linear(self.config.hidden_size, 256)
@@ -81,8 +80,8 @@ class SafeLlamaPixelAR(nn.Module):
             shifted_logits.view(-1, 256),
             shifted_targets.view(-1)
         )
-        # 此处将 loss 视为每像素的交叉熵损失（bpp）
-        bpp = ce_loss
+        # 转换为 base-2 的交叉熵
+        bpp = ce_loss / math.log(2)
 
         return logits, bpp
 
