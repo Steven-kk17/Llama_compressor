@@ -21,11 +21,19 @@ import wandb
 from accelerate import Accelerator, DeepSpeedPlugin
 from peft import LoraConfig, get_peft_model, PeftModel
 from main import SafeLlamaPixelAR
+from torch.utils.data.distributed import DistributedSampler
+
+# CUDA_VISIBLE_DEVICES=1,2,3 python -m torch.distributed.launch --nproc_per_node=3 lora.py \
+#   --batch_size 24 \
+#   --per_device_batch_size 8 \
+#   --gradient_checkpointing
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
+
 log_dir = "./logs"
 os.makedirs(log_dir, exist_ok=True)
-log_file = os.path.join(log_dir, f"training_{datetime.now().strftime('%Y%m%d-%H%M%S')}.log")
+local_rank = int(os.environ.get("LOCAL_RANK", -1))
+log_file = os.path.join(log_dir, f"training_{datetime.now().strftime('%Y%m%d-%H%M%S')}_rank{local_rank}.log")
 
 logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
@@ -109,7 +117,8 @@ class RobustImageDataset(Dataset):
 class LoraFineTuner:
     def __init__(self, args):
         self.args = args
-        if args.use_wandb:
+        self.accelerator = init_accelerator(args)
+        if args.use_wandb and self.accelerator.is_main_process:
             wandb.init(
                 entity="feiyangwu0309-sjtu-icec",
                 project="llama-compression", 
@@ -118,7 +127,7 @@ class LoraFineTuner:
             )
             wandb.run.notes = f"使用LoRA微调LLaMA压缩模型，秩={args.lora_rank}"
             logger.info(f"已初始化wandb，项目：llama-compression")
-        self.accelerator = init_accelerator(args)
+
         if args.use_wandb:
             self.accelerator.init_trackers("llama-compression")
         self.device = self.accelerator.device
@@ -191,10 +200,12 @@ class LoraFineTuner:
             patch_size=16
         )
         logger.info(f"训练数据集: {len(self.train_dataset)} 图像")
+        train_sampler = DistributedSampler(self.train_dataset) if self.accelerator.num_processes > 1 else None
         self.train_dataloader = DataLoader(
             self.train_dataset,
-            batch_size=self.args.batch_size,
-            shuffle=True,
+            batch_size=self.args.per_device_batch_size,  # 不是batch_size
+            shuffle=(train_sampler is None),
+            sampler=train_sampler,
             num_workers=self.args.num_workers,
             pin_memory=True
         )
@@ -249,6 +260,8 @@ class LoraFineTuner:
         return self.best_loss
 
     def _train_epoch(self, epoch):
+        if hasattr(self.train_dataloader, "sampler") and hasattr(self.train_dataloader.sampler, "set_epoch"):
+            self.train_dataloader.sampler.set_epoch(epoch)  
         self.model.train()
         total_loss = 0.0
         checkpoint_interval = self.args.checkpoint_interval * 60
@@ -358,6 +371,7 @@ class LoraFineTuner:
             checkpoint_dir,
             is_trainable=True
         )
+        self.model = self.accelerator.prepare(unwrapped_model) 
         self.last_checkpoint_time = time.time()
         logger.info(f"从epoch {self.start_epoch}加载的检查点，loss {self.best_loss:.4f}")
 
@@ -370,7 +384,7 @@ def get_args():
     parser.add_argument("--lora_dropout", type=float, default=0.05)
     parser.add_argument("--train_dataset", type=str, default="/remote-home/wufeiyang/dataset/flickr30k/Images")
     parser.add_argument("--patch_size", type=int, default=16)
-    parser.add_argument("--batch_size", type=int, default=1)
+    # parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--num_epochs", type=int, default=10)
     parser.add_argument("--learning_rate", type=float, default=1e-4)
     parser.add_argument("--weight_decay", type=float, default=0.01)
