@@ -107,8 +107,23 @@ class TrainingSystem:
         self.best_loss = float("inf")
         if os.path.exists(self.checkpoint_path):
             checkpoint = torch.load(self.checkpoint_path, map_location="cpu")
-            self.model.module.load_state_dict(checkpoint["model_state"])  # use .module in DeepSpeed/Accelerate
-            # 移除这行：self.optimizer.load_state_dict(checkpoint["optimizer_state"])
+            
+            # 创建一个新的state_dict来匹配模型结构
+            model_state = checkpoint["model_state"]
+            new_state_dict = {}
+            
+            # 重命名键以匹配当前模型结构
+            for key, value in model_state.items():
+                if key.startswith("llama.model."):
+                    # 将 "llama.model." 替换为 "llama."
+                    new_key = key.replace("llama.model.", "llama.")
+                    new_state_dict[new_key] = value
+                else:
+                    new_state_dict[key] = value
+                    
+            # 加载修改后的状态字典
+            self.model.module.load_state_dict(new_state_dict, strict=False)
+            
             self.start_epoch = checkpoint["epoch"] + 1
             self.best_loss = checkpoint["best_loss"]
             print(f"Loaded checkpoint from epoch {self.start_epoch}, loss {self.best_loss:.4f}")
@@ -155,12 +170,15 @@ class TrainingSystem:
         self.model.train()
         total_loss = 0.0
 
-        # Use tqdm on the main process only
-        progress_bar = self.accelerator.prepare(
-            tqdm(self.dataloader, desc=f"Epoch {epoch+1}/{self.epochs}")
-        )
+        # 只在主进程上使用 tqdm
+        dataloader_iterator = self.dataloader
+        if self.accelerator.is_main_process:
+            dataloader_iterator = tqdm(
+                self.dataloader, 
+                desc=f"Epoch {epoch+1}/{self.epochs}"
+            )
 
-        for batch_idx, (patches, _) in enumerate(progress_bar):
+        for batch_idx, (patches, _) in enumerate(dataloader_iterator):
             b, n, c, ph, pw = patches.shape
             input_patches = patches.view(b*n, c, ph, pw)
 
@@ -175,8 +193,9 @@ class TrainingSystem:
 
             total_loss += ce_loss.item()
             current_loss = total_loss / (batch_idx + 1)
-            if self.accelerator.is_main_process:
-                progress_bar.set_postfix({"loss": f"{current_loss:.4f}"})
+            # 同样只在主进程更新进度条
+            if self.accelerator.is_main_process and hasattr(dataloader_iterator, "set_postfix"):
+                dataloader_iterator.set_postfix({"loss": f"{current_loss:.4f}"})
                 wandb.log({"train_loss": current_loss})
 
         return total_loss / len(self.dataloader)

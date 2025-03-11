@@ -1,8 +1,14 @@
-# accelerate_config.yaml
 compute_environment: LOCAL_MACHINE
-distributed_type: MULTI_GPU
-num_processes: 2           # Number of GPUs
-fp16_backend: "native"
+distributed_type: DEEPSPEED
+deepspeed_config:
+  deepspeed_config_file: ds_config.json
+  zero_stage: 2
+  offload_optimizer_device: "none"
+  offload_param_device: "none"
+  gradient_clipping: 1.0
+machine_rank: 0
+main_training_function: main
 mixed_precision: bf16
-use_deepspeed: true
-deepspeed_config: "./ds_config.json"
+num_machines: 1
+num_processes: 3
+use_cpu: false
