@@ -426,7 +426,7 @@ class DistillationTrainer:
                 if n in param_names_used:
                     continue
                     
-                if any(nd in n for nd in ["wte", "prob"]):
+                if any(nd in n for nd in ["wte", "wpe", "ln_f", "prob"]):
                     if (not decay and any(nd in n for nd in no_decay)) or (decay and not any(nd in n for nd in no_decay)):
                         params.append(p)
                         param_names_used.add(n)
@@ -885,7 +885,7 @@ class DistillationTrainer:
         if epoch < self.args.progressive_stage1_epochs:
             logger.info("Progressive Training Stage 1: Training embedding and output layers only")
             for name, param in self.student_model.named_parameters():
-                if any(nd in name for nd in ["wte", "prob"]):
+                if any(nd in name for nd in ["wte", "wpe", "ln_f", "prob"]):
                     param.requires_grad = True
                 else:
                     param.requires_grad = False
@@ -894,7 +894,7 @@ class DistillationTrainer:
         elif epoch < self.args.progressive_stage2_epochs:
             logger.info("Progressive Training Stage 2: Adding top transformer layers")
             for name, param in self.student_model.named_parameters():
-                if (any(nd in name for nd in ["wte", "prob"]) or 
+                if (any(nd in name for nd in ["wte", "wpe", "ln_f", "prob"]) or 
                     any(f"h.{i}" in name for i in range(8, 12))):  # 假设12层，解冻最后4层
                     param.requires_grad = True
                 else:
@@ -918,8 +918,8 @@ class DistillationTrainer:
                 # 调整层级学习率系数 - 特别提高底层Transformer的学习率
                 self._init_optimizer_with_custom_lrs(
                     embed_lr_factor=0.8,    # 降低嵌入层，因为已经训练了两个阶段
-                    top_lr_factor=1.2,      # 保持顶层不变
-                    bottom_lr_factor=2.0    # 大幅提高底层学习率
+                    top_lr_factor=1.0,      # 保持顶层不变
+                    bottom_lr_factor=1.5    # 大幅提高底层学习率
                 )
                 
                 # 恢复原始学习率参数但不再使用
@@ -956,9 +956,9 @@ def get_args():
     # Training parameters
     parser.add_argument("--batch_size", type=int, default=24,
                     help="Training batch size per GPU")
-    parser.add_argument("--num_epochs", type=int, default=50,
+    parser.add_argument("--num_epochs", type=int, default=80,
                     help="Number of training epochs")
-    parser.add_argument("--learning_rate", type=float, default=3e-5,
+    parser.add_argument("--learning_rate", type=float, default=4e-5,
                     help="Peak learning rate")
     parser.add_argument("--transformer_lr_factor", type=float, default=0.5,
                     help="Factor for transformer layers learning rate")
@@ -966,7 +966,7 @@ def get_args():
                     help="Weight decay for AdamW")
     parser.add_argument("--warmup_ratio", type=float, default=0.05,
                     help="Proportion of steps for learning rate warmup")
-    parser.add_argument("--max_grad_norm", type=float, default=5.0,
+    parser.add_argument("--max_grad_norm", type=float, default=8.0,
                     help="Maximum gradient norm for clipping")
     parser.add_argument("--gradient_accumulation_steps", type=int, default=8,  # New parameter
                     help="Number of updates steps to accumulate before performing backward/update")
@@ -976,7 +976,7 @@ def get_args():
                     help="Resume training from checkpoint")
     
     # 蒸馏参数
-    parser.add_argument("--temperature", type=float, default=1.0,  # 降低温度
+    parser.add_argument("--temperature", type=float, default=0.8,  # 降低温度
                     help="Temperature for knowledge distillation")
     parser.add_argument("--alpha", type=float, default=0.7,  # 降低KL散度权重
                     help="Weight for soft targets (1-alpha for hard targets)")
@@ -1011,7 +1011,7 @@ def get_args():
     
     parser.add_argument("--progressive_stage1_epochs", type=int, default=2,
                     help="Number of epochs for stage 1 (embedding and output only)")
-    parser.add_argument("--progressive_stage2_epochs", type=int, default=8,
+    parser.add_argument("--progressive_stage2_epochs", type=int, default=10,
                     help="Number of epochs for stage 2 (top layers)")
     parser.add_argument("--standardize_logits", action="store_true", default=True,
                     help="Standardize logits (z-score) before distillation")
