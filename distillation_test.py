@@ -349,11 +349,11 @@ if __name__ == "__main__":
         parser = argparse.ArgumentParser(description='Test distilled GPT2 image compression model')
         # parser.add_argument('--model', type=str, default="./distilled_model/best_model/model.pth",
         #                 help='Path to the distilled model weights')
-        parser.add_argument('--model', type=str, default="./distilled_model/checkpoint_epoch_79/model.pth",
+        parser.add_argument('--model', type=str, default="/remote-home/wufeiyang/distilled_model/best_model/model.pth",
                         help='Path to the distilled model weights')
         parser.add_argument('--dataset', type=str, default='/remote-home/wufeiyang/dataset/kodak_dataset/test', 
                         help='Path to the dataset')
-        parser.add_argument('--skip_ac', action='store_true', 
+        parser.add_argument('--skip_ac', action='store_true', default=True,
                         help='Skip arithmetic coding and just calculate theoretical BPP')
         parser.add_argument('--images', type=str, default=None, 
                         help='Comma-separated list of image indices to process (e.g., "0,5,10")')
@@ -361,7 +361,7 @@ if __name__ == "__main__":
                         help='Type of dataset: huggingface or directory of images')
         parser.add_argument('--dataset_name', type=str, choices=['kodak', 'div2k', 'clic_mobile', 'clic_professional'], 
                         default='kodak', help='Name of predefined dataset to use')
-        parser.add_argument('--no_save_images', action='store_true',
+        parser.add_argument('--no_save_images', action='store_true', default=True,
                         help='Do not save original and reconstructed images')
         parser.add_argument('--keep_original_size', action='store_true',
                         help='Keep original image dimensions (with padding to be divisible by patch size)')
