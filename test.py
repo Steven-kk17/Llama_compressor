@@ -18,7 +18,7 @@ os.makedirs("./results", exist_ok=True)
 # python test.py --keep_original_size --skip_ac --no_save_images --dataset_name kodak
 
 class ModelTester:
-    def __init__(self, model_path="final_model.pth", dataset=None, saved_model_dir="./saved_model",
+    def __init__(self, model_path="model_epoch_40.pth", dataset=None, saved_model_dir="./saved_model",
                  skip_ac=True, save_images=False, keep_original_size=False, batch_size=8):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model_path = model_path
@@ -221,7 +221,7 @@ class ModelTester:
                                         weighted_bpp = sum(bpp.item() * count for bpp, count in zip(batch_bpps, samples_per_gpu))
                                         region_bpp += weighted_bpp  # or total_bpp += weighted_bpp for small images
                                         
-                                        print(f"GPU distribution: {samples_per_gpu} samples, BPP values: {[b.item() for b in batch_bpps]}")
+                                        # print(f"GPU distribution: {samples_per_gpu} samples, BPP values: {[b.item() for b in batch_bpps]}")
                                     else:
                                         # 长度不匹配，使用第一个值乘以batch大小
                                         region_bpp += batch_bpps[0].item() * current_batch_size
@@ -290,7 +290,7 @@ class ModelTester:
                                 weighted_bpp = sum(bpp.item() * count for bpp, count in zip(batch_bpps, samples_per_gpu))
                                 total_bpp += weighted_bpp  # or total_bpp += weighted_bpp for small images
                                 
-                                print(f"GPU distribution: {samples_per_gpu} samples, BPP values: {[b.item() for b in batch_bpps]}")
+                                # print(f"GPU distribution: {samples_per_gpu} samples, BPP values: {[b.item() for b in batch_bpps]}")
                             else:
                                 # 其他长度不匹配情况
                                 total_bpp += batch_bpps[0].item() * current_batch_size
@@ -689,13 +689,13 @@ if __name__ == "__main__":
         parser = argparse.ArgumentParser(description='Test LLaMA image compression')
         parser.add_argument('--keep_original_size', action='store_true',
                     help='Keep original image dimensions (with padding to be divisible by patch size)')
-        parser.add_argument('--model', type=str, default="/remote-home/wufeiyang/final_model.pth", 
+        parser.add_argument('--model', type=str, default="/remote-home/wufeiyang/model_epoch_40.pth", 
                             help='Path to the model weights')
         parser.add_argument('--model_dir', type=str, default="/remote-home/wufeiyang/saved_model", 
                             help='Path to the model config directory')
         parser.add_argument('--dataset', type=str, default='/remote-home/wufeiyang/dataset/kodak_dataset/test', 
                             help='Path to the dataset')
-        parser.add_argument('--skip_ac', action='store_true', 
+        parser.add_argument('--skip_ac', action='store_true', default=True,
                             help='Skip arithmetic coding and just calculate theoretical BPP')
         parser.add_argument('--images', type=str, default=None, 
                             help='Comma-separated list of image indices to process (e.g., "0,5,10")')
@@ -703,7 +703,7 @@ if __name__ == "__main__":
                             help='Type of dataset: huggingface or directory of images')
         parser.add_argument('--dataset_name', type=str, choices=['kodak', 'div2k', 'clic_mobile', 'clic_professional'], 
                             default='kodak', help='Name of predefined dataset to use')
-        parser.add_argument('--no_save_images', action='store_true',
+        parser.add_argument('--no_save_images', action='store_true', default=True,
                             help='Do not save original and reconstructed images')
         parser.add_argument('--batch_size', type=int, default=8,
                             help='Batch size for processing patches')
