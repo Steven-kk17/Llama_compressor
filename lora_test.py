@@ -11,7 +11,7 @@ import math
 os.makedirs("./lora_results", exist_ok=True)
 
 class LoRAModelTester(ModelTester):
-    def __init__(self, model_path="final_model.pth", dataset=None, saved_model_dir="./saved_model",
+    def __init__(self, model_path="model_epoch_40.pth", dataset=None, saved_model_dir="./saved_model",
                  skip_ac=False, lora_path="/remote-home/wufeiyang/best_model", save_images=True, 
                  keep_original_size=False, batch_size=8, single_gpu=False):
         # Store LoRA path and batch size for optimization
@@ -397,7 +397,7 @@ if __name__ == "__main__":
         
         # Parse command line arguments
         parser = argparse.ArgumentParser(description='Test LoRA-adapted LLaMA image compression')
-        parser.add_argument('--model', type=str, default="/remote-home/wufeiyang/final_model.pth", 
+        parser.add_argument('--model', type=str, default="/remote-home/wufeiyang/model_epoch_40.pth", 
                             help='Path to the base model weights')
         parser.add_argument('--lora_path', type=str, default="/remote-home/wufeiyang/best_model", 
                             help='Path to the LoRA adapter weights')
@@ -405,7 +405,7 @@ if __name__ == "__main__":
                             help='Path to the model config directory')
         parser.add_argument('--dataset', type=str, default='/remote-home/wufeiyang/dataset/kodak_dataset/test', 
                             help='Path to the dataset')
-        parser.add_argument('--skip_ac', action='store_true', 
+        parser.add_argument('--skip_ac', action='store_true', default=True,
                             help='Skip arithmetic coding and just calculate theoretical BPP')
         parser.add_argument('--images', type=str, default=None, 
                             help='Comma-separated list of image indices to process (e.g., "0,5,10")')
@@ -413,7 +413,7 @@ if __name__ == "__main__":
                             help='Type of dataset: huggingface or directory of images')
         parser.add_argument('--dataset_name', type=str, choices=['kodak', 'div2k', 'clic_mobile', 'clic_professional'], 
                             default='kodak', help='Name of predefined dataset to use')
-        parser.add_argument('--no_save_images', action='store_true',
+        parser.add_argument('--no_save_images', action='store_true',default=True,
                             help='Do not save original and reconstructed images')
         parser.add_argument('--keep_original_size', action='store_true',
                             help='Keep original image dimensions (with padding to be divisible by patch size)')
