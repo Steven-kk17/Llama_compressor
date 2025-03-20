@@ -136,6 +136,10 @@ class LoraFineTuner:
         self.accelerator = Accelerator(
             mixed_precision="bf16",
             log_with="wandb" if args.use_wandb else None,
+            deepspeed_plugin=DeepSpeedPlugin(
+                zero_stage=2,
+                offload_optimizer_device="none"
+            ) if args.use_deepspeed else None
         )
         # 初始化wandb
         if args.use_wandb and self.accelerator.is_main_process:
@@ -238,9 +242,14 @@ class LoraFineTuner:
             lora_dropout=self.args.lora_dropout, # Dropout概率
             # bias="none",                         # 不使用偏置参数
             # task_type="CAUSAL_LM",               # 自回归语言模型任务类型
-            target_modules=[                     # 要应用LoRA的LLaMA模块
+            target_modules=[  
+                # 现有层
                 "q_proj", "k_proj", "v_proj", "o_proj",
-                "gate_proj", "down_proj", "up_proj"
+                "gate_proj", "down_proj", "up_proj",
+                # 添加层归一化和嵌入层
+                "input_layernorm.weight", "post_attention_layernorm.weight",
+                "norm.weight",  # 最终归一化层
+                "embed_tokens.weight"  # 词嵌入
             ]
         )
         
@@ -540,15 +549,15 @@ def get_args():
     parser = argparse.ArgumentParser(description="使用LoRA为基于LLaMA的图像压缩模型进行微调")
     
     # 模型参数
-    parser.add_argument("--model_checkpoint", type=str, default="/remote-home/wufeiyang/final_model.pth",
+    parser.add_argument("--model_checkpoint", type=str, default="/remote-home/wufeiyang/model_epoch_40.pth",
                         help="模型检查点路径")
     parser.add_argument("--model_dir", type=str, default="/remote-home/wufeiyang/saved_model",
                         help="模型配置目录路径")
     
     # LoRA参数
-    parser.add_argument("--lora_rank", type=int, default=4,
+    parser.add_argument("--lora_rank", type=int, default=8,
                         help="LoRA适应矩阵的秩")
-    parser.add_argument("--lora_alpha", type=int, default=8,
+    parser.add_argument("--lora_alpha", type=int, default=16,
                         help="LoRA的缩放因子")
     parser.add_argument("--lora_dropout", type=float, default=0.05,
                         help="LoRA层的Dropout概率")
@@ -562,19 +571,19 @@ def get_args():
     # 训练参数
     parser.add_argument("--batch_size", type=int, default=8,
                         help="每个GPU的训练批量大小")
-    parser.add_argument("--num_epochs", type=int, default=80,
+    parser.add_argument("--num_epochs", type=int, default=50,
                         help="训练轮次数")
-    parser.add_argument("--learning_rate", type=float, default=1e-4,
+    parser.add_argument("--learning_rate", type=float, default=2e-4,
                         help="峰值学习率")
     parser.add_argument("--weight_decay", type=float, default=0.01,
                         help="AdamW的权重衰减")
-    parser.add_argument("--warmup_ratio", type=float, default=0.1,
+    parser.add_argument("--warmup_ratio", type=float, default=0.05,
                         help="学习率预热的步骤比例")
     parser.add_argument("--max_grad_norm", type=float, default=1.0,
                         help="梯度裁剪的最大范数")
     parser.add_argument("--gradient_checkpointing", action="store_true",
                         help="启用梯度检查点以节省内存")
-    parser.add_argument("--num_workers", type=int, default=3,
+    parser.add_argument("--num_workers", type=int, default=2,
                         help="数据加载的工作进程数")
     parser.add_argument("--resume_from_checkpoint", type=str, default=None,
                         help="从检查点恢复训练")
@@ -598,6 +607,10 @@ def get_args():
                         help="随机种子以确保可重现性")
     parser.add_argument("--output_dir", type=str, default="./lora_output",
                         help="保存输出文件的目录")
+    
+    # Accelerator参数
+    parser.add_argument("--use_deepspeed", action="store_true", default=True,
+                        help="使用DeepSpeed插件")
     
     return parser.parse_args()
 

@@ -603,9 +603,9 @@ def get_args():
                         help="GPT2模型配置目录路径")
     
     # LoRA参数
-    parser.add_argument("--lora_rank", type=int, default=16,
+    parser.add_argument("--lora_rank", type=int, default=8,
                         help="LoRA适应矩阵的秩")
-    parser.add_argument("--lora_alpha", type=int, default=32,
+    parser.add_argument("--lora_alpha", type=int, default=16,
                         help="LoRA的缩放因子")
     parser.add_argument("--lora_dropout", type=float, default=0.05,
                         help="LoRA层的Dropout概率")
@@ -621,7 +621,7 @@ def get_args():
                         help="每个GPU的训练批量大小")
     parser.add_argument("--num_epochs", type=int, default=50,
                         help="训练轮次数")
-    parser.add_argument("--learning_rate", type=float, default=3e-4,
+    parser.add_argument("--learning_rate", type=float, default=2e-4,
                         help="峰值学习率")
     parser.add_argument("--weight_decay", type=float, default=0.01,
                         help="AdamW的权重衰减")

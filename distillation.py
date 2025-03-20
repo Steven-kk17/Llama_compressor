@@ -658,20 +658,19 @@ class DistillationTrainer:
                 # 后60%快速降低至更小值
                 current_alpha = alpha * max(0.1, 1.0 - 0.2 - (progress-0.4) * 1.5)  # 降至原始alpha的10%
             
-            # 第3阶段特殊处理 - 更强调CE loss
+            # 第3阶段
             if self.args.use_progressive_training:
                 stage3_start = self.args.progressive_stage2_epochs * len(self.train_dataloader)
                 
-                # 第3阶段的前5个epoch特别强调CE loss
+                # 5个epoch强调CE loss
                 stage3_special = stage3_start + 5 * len(self.train_dataloader)
                 
                 if stage3_start <= self.global_step <= stage3_special:
-                    # 在第三阶段开始时大幅降低alpha (降至正常值的50%)
                     current_alpha = current_alpha * 0.5
                     
                     # 每30步完全使用CE loss训练一个批次
                     if self.global_step % 30 == 0:
-                        current_alpha = 0.0  # 完全使用CE loss
+                        current_alpha = 0.0
         else:
             current_alpha = alpha
                     
@@ -936,7 +935,7 @@ def get_args():
     parser.add_argument("--dynamic_temperature", action="store_true", default=True,
                     help="Dynamically decrease temperature during training")
     # Model paths
-    parser.add_argument("--teacher_model_path", type=str, default="/remote-home/wufeiyang/final_model.pth",
+    parser.add_argument("--teacher_model_path", type=str, default="/remote-home/wufeiyang/model_epoch_40.pth",
                     help="Path to teacher model checkpoint")
     parser.add_argument("--llama_model_dir", type=str, default="/remote-home/wufeiyang/saved_model",
                     help="Path to LLaMA model configuration directory")
