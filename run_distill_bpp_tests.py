@@ -29,8 +29,8 @@ for dataset in datasets:
         "--dataset_name", dataset,
         "--skip_ac",
         "--no_save_images",
-        "--batch_size", "16"
-        # "--keep_original_size"
+        "--batch_size", "4"
+        "--keep_original_size"
     ]
     
     # 执行命令并捕获输出

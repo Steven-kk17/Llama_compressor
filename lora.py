@@ -549,7 +549,7 @@ def get_args():
     parser = argparse.ArgumentParser(description="使用LoRA为基于LLaMA的图像压缩模型进行微调")
     
     # 模型参数
-    parser.add_argument("--model_checkpoint", type=str, default="/remote-home/wufeiyang/model_epoch_40.pth",
+    parser.add_argument("--model_checkpoint", type=str, default="/remote-home/wufeiyang/model_epoch_80.pth",
                         help="模型检查点路径")
     parser.add_argument("--model_dir", type=str, default="/remote-home/wufeiyang/saved_model",
                         help="模型配置目录路径")

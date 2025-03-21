@@ -32,10 +32,13 @@ class SafeLlamaPixelAR(nn.Module):
         # 缩小词表到 256
         self.llama.resize_token_embeddings(256)
 
-        # 3) 冻结 Llama 本体参数，但留出 embedding 部分供训练
-        self.embeddings = self.llama.get_input_embeddings()
-        self.llama.set_input_embeddings(None)
-        for param in self.embeddings.parameters():
+        # 3) 选择性冻结参数 - 只保留embedding层可训练
+        # 先冻结所有参数
+        for param in self.llama.parameters():
+            param.requires_grad = False
+            
+        # 然后只解冻embedding层
+        for param in self.llama.get_input_embeddings().parameters():
             param.requires_grad = True
 
         # 新增的可学习 prob 层，将 hidden_size 映射至 256

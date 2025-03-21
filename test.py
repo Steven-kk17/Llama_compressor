@@ -689,7 +689,9 @@ if __name__ == "__main__":
         parser = argparse.ArgumentParser(description='Test LLaMA image compression')
         parser.add_argument('--keep_original_size', action='store_true',
                     help='Keep original image dimensions (with padding to be divisible by patch size)')
-        parser.add_argument('--model', type=str, default="/remote-home/wufeiyang/model_epoch_40.pth", 
+        # parser.add_argument('--model', type=str, default="/remote-home/wufeiyang/model_epoch_80.pth", 
+        #                     help='Path to the model weights')
+        parser.add_argument('--model', type=str, default="./model_epoch_80.pth", 
                             help='Path to the model weights')
         parser.add_argument('--model_dir', type=str, default="/remote-home/wufeiyang/saved_model", 
                             help='Path to the model config directory')

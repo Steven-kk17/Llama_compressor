@@ -26,7 +26,7 @@ for dataset in datasets:
     
     # 运行命令
     cmd = [
-        "python", "test.py",
+        "python", "lora_test.py",
         "--dataset_name", dataset,
         "--skip_ac",
         "--no_save_images",
