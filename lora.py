@@ -52,17 +52,15 @@ logger = logging.getLogger(__name__)
 class RobustImageDataset(Dataset):
     """Dataset for image compression fine-tuning with robust handling"""
     
-    def __init__(self, root_dir, size=256, patch_size=16, transform=None):
+    def __init__(self, root_dir, patch_size=16, transform=None):
         super().__init__()
         self.root_dir = root_dir
-        self.size = size
         self.patch_size = patch_size
         self._init_paths()
         
-        # Default transform if none provided
+        # Default transform if none provided - 移除 Resize 操作
         if transform is None:
             self.transform = T.Compose([
-                T.Resize((size, size)),
                 T.ToTensor(),
                 T.Lambda(lambda x: x * 255)  # Scale to [0, 255]
             ])
@@ -78,9 +76,18 @@ class RobustImageDataset(Dataset):
         return len(self.paths)
         
     def random_patchify(self, img_tensor):
-        """随机从图像中提取patch"""
+        """从图像中随机提取patch，处理不同尺寸图像"""
         import random
         c, h, w = img_tensor.shape
+        
+        # 检查图像是否足够大能提取patch
+        if h < self.patch_size or w < self.patch_size:
+            # 如果图像太小，填充到最小尺寸
+            logger.warning(f"图像尺寸太小 ({h}x{w})，添加填充至最小尺寸")
+            padder = nn.ZeroPad2d((0, max(0, self.patch_size - w), 0, max(0, self.patch_size - h)))
+            img_tensor = padder(img_tensor)
+            # 更新尺寸
+            c, h, w = img_tensor.shape
         
         # 随机选择起始位置
         top = random.randint(0, h - self.patch_size)
@@ -94,9 +101,9 @@ class RobustImageDataset(Dataset):
         """Get image and prepare for training"""
         path = self.paths[idx]
         try:
-            # Load and transform image
+            # Load and transform image - 不改变尺寸
             img = Image.open(path).convert("RGB")
-            img_tensor = self.transform(img)
+            img_tensor = self.transform(img)  # 直接转换，不调整大小
             
             # 随机提取patch
             patch = self.random_patchify(img_tensor)
@@ -266,11 +273,10 @@ class LoraFineTuner:
         """初始化数据集和数据加载器"""
         logger.info("加载数据集...")
         
-        # 创建训练数据集
+        # 创建训练数据集 - 移除了size参数
         self.train_dataset = RobustImageDataset(
             root_dir=self.args.train_dataset,
-            size=256,
-            patch_size=16
+            patch_size=self.args.patch_size
         )
         
         logger.info(f"训练数据集: {len(self.train_dataset)} 图像")
@@ -358,9 +364,9 @@ class LoraFineTuner:
             # 记录最终结果
             wandb.log({"best_loss": self.best_loss})
             # 上传最终模型文件
-            artifact = wandb.Artifact(f"lora_model", type="model")
-            artifact.add_dir(os.path.join(self.args.output_dir, "best_model"))
-            wandb.log_artifact(artifact)
+            # artifact = wandb.Artifact(f"lora_model", type="model")
+            # artifact.add_dir(os.path.join(self.args.output_dir, "best_model"))
+            # wandb.log_artifact(artifact)
             # 结束wandb跟踪器
             self.accelerator.end_training()
         
@@ -549,9 +555,9 @@ def get_args():
     parser = argparse.ArgumentParser(description="使用LoRA为基于LLaMA的图像压缩模型进行微调")
     
     # 模型参数
-    parser.add_argument("--model_checkpoint", type=str, default="/remote-home/wufeiyang/model_epoch_80.pth",
+    parser.add_argument("--model_checkpoint", type=str, default="/remote-home/wufeiyang/1_train/4_train_with_original_image/model_epoch_150.pth",
                         help="模型检查点路径")
-    parser.add_argument("--model_dir", type=str, default="/remote-home/wufeiyang/saved_model",
+    parser.add_argument("--model_dir", type=str, default="/remote-home/wufeiyang/Llama_1B",
                         help="模型配置目录路径")
     
     # LoRA参数
@@ -571,7 +577,7 @@ def get_args():
     # 训练参数
     parser.add_argument("--batch_size", type=int, default=8,
                         help="每个GPU的训练批量大小")
-    parser.add_argument("--num_epochs", type=int, default=50,
+    parser.add_argument("--num_epochs", type=int, default=100,
                         help="训练轮次数")
     parser.add_argument("--learning_rate", type=float, default=2e-4,
                         help="峰值学习率")
