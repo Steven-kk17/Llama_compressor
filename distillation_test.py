@@ -60,6 +60,10 @@ class DistilledModelTester(ModelTester):
 
     def process_dataset_image(self, img):
         """处理单张图像，切分为patches并限制最大区域大小"""
+        # 测量推理时间
+        import time
+        start_time = time.time()
+        
         # 应用变换
         img_tensor = self.transform(img).unsqueeze(0).to(self.device)  # [1, 3, H, W]
         b, c, h, w = img_tensor.shape
@@ -123,9 +127,25 @@ class DistilledModelTester(ModelTester):
             
             print(f"Image will be processed in {total_regions} regions")
             
+            # 获取可用 GPU 数量
+            num_gpus = torch.cuda.device_count() if not self.single_gpu else 1
+            if num_gpus > 1:
+                print(f"Using {num_gpus} GPUs for region processing")
+            
             # 逐区域处理
+            region_count = 0
             for region_i in range(num_regions_h):
                 for region_j in range(num_regions_w):
+                    # GPU 选择逻辑
+                    if num_gpus > 1:
+                        gpu_id = region_count % num_gpus
+                        current_device = torch.device(f"cuda:{gpu_id}")
+                        print(f"Processing region ({region_i},{region_j}) on GPU {gpu_id}")
+                    else:
+                        current_device = self.device
+                    
+                    region_count += 1
+                    
                     # 计算当前区域的patch范围
                     start_h = region_i * max_region_size
                     start_w = region_j * max_region_size
@@ -141,6 +161,9 @@ class DistilledModelTester(ModelTester):
                     region_img = img_tensor[:, :, 
                                     start_h*self.patch_size:end_h*self.patch_size,
                                     start_w*self.patch_size:end_w*self.patch_size]
+                    
+                    if num_gpus > 1:
+                        region_img = region_img.to(current_device)
                     
                     # 当前区域的所有patches
                     patches = []
@@ -161,6 +184,10 @@ class DistilledModelTester(ModelTester):
                             # 批量处理patches
                             for i in range(0, len(patches), self.batch_size):
                                 batch_patches = torch.cat(patches[i:min(i+self.batch_size, len(patches))], dim=0)
+                                
+                                if num_gpus > 1:
+                                    batch_patches = batch_patches.to(current_device)
+                                    
                                 current_batch_size = batch_patches.size(0)  # 获取实际的batch大小
                                 
                                 # 处理批次
@@ -197,7 +224,15 @@ class DistilledModelTester(ModelTester):
                                         region_bpp += batch_bpps.mean().item() * current_batch_size
                                 
                                 # 收集结果
-                                region_logits.extend(batch_logits.chunk(current_batch_size, dim=0))
+                                if num_gpus > 1:
+                                    chunked_logits = [logit.cpu() for logit in batch_logits.chunk(current_batch_size, dim=0)]
+                                    region_logits.extend(chunked_logits)
+                                else:
+                                    region_logits.extend(batch_logits.chunk(current_batch_size, dim=0))
+                                
+                                # 清理内存
+                                del batch_logits
+                                torch.cuda.empty_cache()
 
                     
                     # 添加当前区域的结果
@@ -265,60 +300,41 @@ class DistilledModelTester(ModelTester):
                             total_bpp += float(batch_bpps) * current_batch_size
                         
                         # 收集结果
-                        all_logits.extend(batch_logits.chunk(current_batch_size, dim=0))
+                        if self.single_gpu:
+                            all_logits.extend(batch_logits.chunk(current_batch_size, dim=0))
+                        else:
+                            chunked_logits = [logit.cpu() for logit in batch_logits.chunk(current_batch_size, dim=0)]
+                            all_logits.extend(chunked_logits)
+                        
+                        # 立即清理内存
+                        del batch_logits
+                        torch.cuda.empty_cache()
         
         # 计算平均BPP
         avg_bpp = total_bpp / total_patches
         
-        # 合并所有logits
-        merged_logits = torch.cat(all_logits, dim=1)
-        print(f"Merged logits shape: {merged_logits.shape}, Average BPP: {avg_bpp:.4f}")
+        
+        # 修改：避免内存错误，不合并所有logits，而是创建一个占位符
+        print("Skipping full logits merging to save memory (only BPP calculation needed)")
+        
+        # 选择第一个logit作为占位符，与lora_test一致
+        if all_logits:
+            placeholder_logit = all_logits[0]
+            # 注意: 此处假设你只需要返回有效的形状，而不关心内容
+            merged_logits = placeholder_logit
+        else:
+            # 极端情况下创建一个空的占位符
+            merged_logits = torch.zeros((1, 1, 256), device='cpu')
+            
+        print(f"Average BPP: {avg_bpp:.4f}")
         
         return img_tensor, merged_logits, torch.tensor(avg_bpp)
         
+    # 修改 visualize_results 方法，只用于占位符（不执行实际可视化）
     def visualize_results(self, original_img, reconstructed_img, metrics, idx):
-        """修改输出路径以存储蒸馏结果"""
-        import matplotlib.pyplot as plt
-        import numpy as np
-        
-        # 如果保持原始尺寸，裁剪回原始尺寸
-        if self.keep_original_size:
-            h, w = self.original_h, self.original_w
-            original_img = original_img[:, :, :h, :w]
-            reconstructed_img = reconstructed_img[:, :, :h, :w]
-        
-        # 转换张量为图像
-        original = original_img.squeeze(0).permute(1, 2, 0).cpu().numpy().astype(np.uint8)
-        reconstructed = reconstructed_img.squeeze(0).permute(1, 2, 0).cpu().numpy().astype(np.uint8)
-        
-        # 打印调试信息
-        print(f"Original image shape: {original.shape}, range: [{original.min()} - {original.max()}]")
-        print(f"Reconstructed image shape: {reconstructed.shape}, range: [{reconstructed.min()} - {reconstructed.max()}]")
-        
-        if self.save_images:  # 仅在启用时保存
-            print(f"Visualizing results - Original range: [{original.min()}-{original.max()}], " +
-                f"Reconstructed range: [{reconstructed.min()}-{reconstructed.max()}]")
-            
-            plt.figure(figsize=(12, 6))
-            plt.subplot(1, 2, 1)
-            plt.imshow(original)
-            plt.title("Original")
-            plt.axis('off')
-            
-            plt.subplot(1, 2, 2)
-            plt.imshow(reconstructed)
-            plt.title(f"Distilled Reconstructed (PSNR: {metrics['psnr']:.2f} dB)")
-            plt.axis('off')
-            
-            # 保存到蒸馏结果目录
-            original_path = f"./distilled_results/original_{idx}.png"
-            reconstructed_path = f"./distilled_results/reconstructed_{idx}.png"
-            plt.imsave(original_path, original)
-            plt.imsave(reconstructed_path, reconstructed)
-            plt.close()
-            
-            print(f"Original image saved to {original_path}")
-            print(f"Reconstructed image saved to {reconstructed_path}")
+        """空方法，跳过所有图像可视化"""
+        print("Skipping image visualization (only BPP calculation needed)")
+        # 不执行任何可视化操作，保持函数存在仅为接口兼容
         
     def run(self, image_indices=None):
         """修改以保存结果到蒸馏特定的CSV文件"""
@@ -326,20 +342,43 @@ class DistilledModelTester(ModelTester):
         
         # 如果有结果，保存到蒸馏特定CSV
         if results:
-            import csv
-            with open("./distilled_results/distilled_metrics.csv", "w", newline="") as f:
-                writer = csv.writer(f)
-                writer.writerow(["Image Index", "PSNR", "Model BPP", "Actual BPP", "Compression Ratio"])
-                for r in results:
-                    writer.writerow([
-                        r["image_idx"],
-                        r["metrics"]["psnr"],
-                        r["metrics"]["model_bpp"],
-                        r["metrics"]["actual_bpp"],
-                        r["metrics"]["compression_ratio"]
-                    ])
-                print("Metrics saved to ./distilled_results/distilled_metrics.csv")
+            try:
+                import csv
+                import os
                 
+                # 获取全局 args 变量
+                global args
+                if 'args' in globals() and hasattr(args, 'dataset_name'):
+                    dataset_name = args.dataset_name
+                # 备用方法 (如果全局变量不可用)
+                elif hasattr(self.dataset, 'image_files') and self.dataset.image_files:
+                    dataset_name = os.path.basename(os.path.dirname(self.dataset.image_files[0]))
+                else:
+                    dataset_name = "dataset"
+                
+                # 创建输出目录
+                os.makedirs("./distilled_results", exist_ok=True)
+                
+                # CSV 文件路径 - 使用数据集名称，与 lora_test 保持一致格式
+                csv_path = f"./distilled_results/distilled_{dataset_name}_metrics.csv"
+                
+                # 写入 CSV 文件
+                with open(csv_path, "w", newline="") as f:
+                    writer = csv.writer(f)
+                    writer.writerow(["Image Index", "PSNR", "Model BPP", "Actual BPP", "Compression Ratio"])
+                    
+                    for r in results:
+                        writer.writerow([
+                            r["image_idx"],
+                            r["metrics"]["psnr"],
+                            r["metrics"]["model_bpp"],
+                            r["metrics"]["actual_bpp"] if "actual_bpp" in r["metrics"] and r["metrics"]["actual_bpp"] else "N/A",
+                            r["metrics"]["compression_ratio"]
+                        ])
+                    print(f"Metrics saved to {csv_path}")
+            except Exception as e:
+                print(f"Error saving metrics to CSV: {e}")
+        
         return results
 
 
@@ -349,7 +388,7 @@ if __name__ == "__main__":
         parser = argparse.ArgumentParser(description='Test distilled GPT2 image compression model')
         # parser.add_argument('--model', type=str, default="./distilled_model/best_model/model.pth",
         #                 help='Path to the distilled model weights')
-        parser.add_argument('--model', type=str, default="/remote-home/wufeiyang/distilled_model/best_model/model.pth",
+        parser.add_argument('--model', type=str, default="/remote-home/wufeiyang/3_distill/4_resize_distill_140_epoch/best_ce_model/best_ce_model/model.pth",
                         help='Path to the distilled model weights')
         parser.add_argument('--dataset', type=str, default='/remote-home/wufeiyang/dataset/kodak_dataset/test', 
                         help='Path to the dataset')

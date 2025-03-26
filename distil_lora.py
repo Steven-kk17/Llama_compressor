@@ -52,17 +52,15 @@ logger = logging.getLogger(__name__)
 class RobustImageDataset(Dataset):
     """Dataset for image compression fine-tuning with robust handling"""
     
-    def __init__(self, root_dir, size=256, patch_size=16, transform=None):
+    def __init__(self, root_dir, patch_size=16, transform=None):
         super().__init__()
         self.root_dir = root_dir
-        self.size = size
         self.patch_size = patch_size
         self._init_paths()
         
-        # Default transform if none provided
+        # Default transform if none provided - 移除 Resize 操作
         if transform is None:
             self.transform = T.Compose([
-                T.Resize((size, size)),
                 T.ToTensor(),
                 T.Lambda(lambda x: x * 255)  # Scale to [0, 255]
             ])
@@ -76,35 +74,22 @@ class RobustImageDataset(Dataset):
 
     def __len__(self):
         return len(self.paths)
-        
-    def random_patchify(self, img_tensor):
-        """随机从图像中提取patch"""
-        import random
-        c, h, w = img_tensor.shape
-        
-        # 随机选择起始位置
-        top = random.randint(0, h - self.patch_size)
-        left = random.randint(0, w - self.patch_size)
-        
-        # 提取patch
-        patch = img_tensor[:, top:top+self.patch_size, left:left+self.patch_size]
-        return patch
-        
+    
     def __getitem__(self, idx):
         """Get image and prepare for training"""
         path = self.paths[idx]
         try:
-            # Load and transform image
+            # 加载并转换图像 - 不改变尺寸
             img = Image.open(path).convert("RGB")
-            img_tensor = self.transform(img)
+            img_tensor = self.transform(img)  # 直接转换，不调整大小
             
             # 随机提取patch
             patch = self.random_patchify(img_tensor)
             
             # 将pixel转换为整数，并准备为序列
             pixel_values = patch.long().clamp(0, 255)
-            b, h, w = pixel_values.shape
-            seq_len = b * h * w
+            c, h, w = pixel_values.shape
+            seq_len = c * h * w
             pixel_ids = pixel_values.reshape(seq_len)
             
             # 为自回归预测准备输入和标签
@@ -120,6 +105,28 @@ class RobustImageDataset(Dataset):
             logger.warning(f"加载图像 {path} 出错: {str(e)}，跳过...")
             # 出错时使用下一个图像代替
             return self[(idx + 1) % len(self)]
+        
+    def random_patchify(self, img_tensor):
+        """从图像中随机提取patch，处理不同尺寸图像"""
+        import random
+        c, h, w = img_tensor.shape
+        
+        # 检查图像是否足够大能提取patch
+        if h < self.patch_size or w < self.patch_size:
+            # 如果图像太小，填充到最小尺寸
+            logger.warning(f"图像尺寸太小 ({h}x{w})，添加填充至最小尺寸")
+            padder = nn.ZeroPad2d((0, max(0, self.patch_size - w), 0, max(0, self.patch_size - h)))
+            img_tensor = padder(img_tensor)
+            # 更新尺寸
+            c, h, w = img_tensor.shape
+        
+        # 随机选择起始位置
+        top = random.randint(0, h - self.patch_size)
+        left = random.randint(0, w - self.patch_size)
+        
+        # 提取patch
+        patch = img_tensor[:, top:top+self.patch_size, left:left+self.patch_size]
+        return patch
 
 class GPT2LoraFineTuner:
     """使用LoRA对GPT2蒸馏模型进行微调的类"""
@@ -312,10 +319,9 @@ class GPT2LoraFineTuner:
         """初始化数据集和数据加载器"""
         logger.info("加载数据集...")
         
-        # 创建训练数据集
+        # 创建训练数据集 - 移除size参数
         self.train_dataset = RobustImageDataset(
             root_dir=self.args.train_dataset,
-            size=256,
             patch_size=16
         )
         
@@ -597,7 +603,7 @@ def get_args():
     parser = argparse.ArgumentParser(description="使用LoRA对蒸馏的GPT2图像压缩模型进行微调")
     
     # 模型参数
-    parser.add_argument("--model_checkpoint", type=str, default="./distilled_model/best_model/model.pth",
+    parser.add_argument("--model_checkpoint", type=str, default="/remote-home/wufeiyang/3_distill/4_distill_140_epoch/best_ce_model/model.pth",
                         help="蒸馏GPT2模型检查点路径")
     parser.add_argument("--gpt2_model_dir", type=str, default="/remote-home/wufeiyang/gpt2_model",
                         help="GPT2模型配置目录路径")
@@ -619,7 +625,7 @@ def get_args():
     # 训练参数
     parser.add_argument("--batch_size", type=int, default=24,
                         help="每个GPU的训练批量大小")
-    parser.add_argument("--num_epochs", type=int, default=50,
+    parser.add_argument("--num_epochs", type=int, default=100,
                         help="训练轮次数")
     parser.add_argument("--learning_rate", type=float, default=2e-4,
                         help="峰值学习率")
@@ -657,7 +663,7 @@ def get_args():
     # 其他参数
     parser.add_argument("--seed", type=int, default=42,
                         help="随机种子以确保可重现性")
-    parser.add_argument("--output_dir", type=str, default="./gpt2_lora_output",
+    parser.add_argument("--output_dir", type=str, default="/remote-home/wufeiyang/gpt2_lora_output",
                         help="保存输出文件的目录")
     
     return parser.parse_args()

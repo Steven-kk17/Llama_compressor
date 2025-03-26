@@ -166,7 +166,7 @@ class ModelTester:
                     region_patches_h = end_h - start_h
                     region_patches_w = end_w - start_w
                     
-                    print(f"Processing region ({region_i},{region_j}): {region_patches_h}x{region_patches_w} patches")
+                    # print(f"Processing region ({region_i},{region_j}): {region_patches_h}x{region_patches_w} patches")
                     
                     # 提取当前区域
                     region_img = img_tensor[:, :, 
@@ -305,11 +305,19 @@ class ModelTester:
         
         # 计算平均BPP
         avg_bpp = total_bpp / total_patches
-        
-        # 合并所有logits
-        merged_logits = torch.cat(all_logits, dim=1)
-        print(f"Merged logits shape: {merged_logits.shape}, Average BPP: {avg_bpp:.4f}")
-        
+        print(f"Average BPP: {avg_bpp:.4f}")
+
+        # 避免内存错误：不合并所有 logits，而是创建一个占位符
+        print("Skipping full logits merging to save memory (only BPP calculation needed)")
+        # 选择第一个 logit 作为占位符
+        if all_logits:
+            placeholder_logit = all_logits[0]
+            # 注意: 此处假设你只需要返回有效的形状，而不关心内容
+            merged_logits = placeholder_logit
+        else:
+            # 极端情况下创建一个空的占位符
+            merged_logits = torch.zeros((1, 1, 256), device='cpu')
+
         return img_tensor, merged_logits, torch.tensor(avg_bpp)
         
     def get_probabilities(self, logits):
@@ -662,13 +670,14 @@ class ModelTester:
                 avg_actual_bpp = sum(r["metrics"]["actual_bpp"] for r in results) / len(results)
                 avg_ratio = sum(r["metrics"]["compression_ratio"] for r in results) / len(results)
                 
-                # Calculate dataset-wide BPP (both theoretical and actual)
+                # 计算数据集范围的 BPP
                 theor_dataset_bpp = total_theor_bits / total_dataset_pixels
                 if total_dataset_bits > 0:
                     actual_dataset_bpp = total_dataset_bits / total_dataset_pixels
                 else:
                     actual_dataset_bpp = theor_dataset_bpp
                 
+                # 打印摘要
                 print("\nSummary:")
                 print(f"Average PSNR: {avg_psnr:.2f} dB")
                 print(f"Average Model-Estimated BPP: {avg_model_bpp:.4f}")
@@ -677,8 +686,49 @@ class ModelTester:
                 print(f"Overall Theoretical Dataset BPP: {theor_dataset_bpp:.4f}")
                 if not self.skip_ac:
                     print(f"Overall Actual Dataset BPP: {actual_dataset_bpp:.4f}")
+                
+                # 添加: 保存 CSV 格式的指标数据
+                try:
+                    import csv
+                    import os
+                    
+                    # 获取全局 args 变量
+                    global args
+                    if 'args' in globals() and hasattr(args, 'dataset_name'):
+                        dataset_name = args.dataset_name
+                    # 备用方法 (如果全局变量不可用)
+                    elif hasattr(self.dataset, 'image_files') and self.dataset.image_files:
+                        dataset_name = os.path.basename(os.path.dirname(self.dataset.image_files[0]))
+                    else:
+                        dataset_name = "dataset"
+                    
+                    # 创建输出目录
+                    os.makedirs("./results", exist_ok=True)
+                    
+                    # CSV 文件路径
+                    csv_path = f"./results/{dataset_name}_metrics.csv"
+                    
+                    # 写入 CSV 文件
+                    with open(csv_path, 'w', newline='') as csvfile:
+                        writer = csv.writer(csvfile)
+                        # 写入标题行
+                        writer.writerow(['Image Index', 'Model BPP', 'Actual BPP', 'PSNR', 'Compression Ratio'])
+                        
+                        # 写入每张图片的数据
+                        for r in results:
+                            writer.writerow([
+                                r["image_idx"], 
+                                r["metrics"]["model_bpp"],
+                                r["metrics"]["actual_bpp"],
+                                r["metrics"]["psnr"],
+                                r["metrics"]["compression_ratio"]
+                            ])
+                    
+                    print(f"Metrics saved to {csv_path}")
+                except Exception as e:
+                    print(f"Error saving metrics to CSV: {e}")
             
-        return results
+            return results
         
         
 if __name__ == "__main__":
@@ -691,9 +741,9 @@ if __name__ == "__main__":
                     help='Keep original image dimensions (with padding to be divisible by patch size)')
         # parser.add_argument('--model', type=str, default="/remote-home/wufeiyang/model_epoch_80.pth", 
         #                     help='Path to the model weights')
-        parser.add_argument('--model', type=str, default="./model_epoch_80.pth", 
+        parser.add_argument('--model', type=str, default="/remote-home/wufeiyang/1_train/4_train_with_original_image/model_epoch_150.pth", 
                             help='Path to the model weights')
-        parser.add_argument('--model_dir', type=str, default="/remote-home/wufeiyang/saved_model", 
+        parser.add_argument('--model_dir', type=str, default="/remote-home/wufeiyang/Llama_1B", 
                             help='Path to the model config directory')
         parser.add_argument('--dataset', type=str, default='/remote-home/wufeiyang/dataset/kodak_dataset/test', 
                             help='Path to the dataset')

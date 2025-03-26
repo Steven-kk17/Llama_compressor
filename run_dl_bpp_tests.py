@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# filepath: /home/steven/code/llama_compression/run_distill_bpp_tests.py
 import subprocess
 import re
 import os
@@ -20,15 +19,15 @@ def run_tests(args):
     skip_ac = True
     no_save_images = True
     
-    print(f"开始测试: 蒸馏模型测试")
-    print(f"使用固定参数: --skip_ac --no_save_images {'--keep_original_size' if args.keep_original_size else ''}")
+    print(f"开始测试: GPT2 LoRA 模型测试")
+    print(f"使用固定参数: --skip_ac --no_save_images")
     print(f"批处理大小: {args.batch_size}")
     print(f"结果将保存到: {results_file}")
     
     # 清空或创建结果文件
     with open(results_file, "w") as f:
-        f.write(f"# Distilled Model BPP Test Results - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-        f.write(f"# 参数: --skip_ac --no_save_images {'--keep_original_size' if args.keep_original_size else ''}\n")
+        f.write(f"# GPT2 LoRA Model BPP Test Results - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write(f"# 参数: --skip_ac --no_save_images\n")
         f.write(f"# 批处理大小: {args.batch_size}\n\n")
         f.write("Dataset            | Theoretical BPP | Images  \n")
         f.write("-------------------|----------------|--------\n")
@@ -47,16 +46,12 @@ def run_tests(args):
         
         # 准备命令
         cmd = [
-            "python", "distillation_test.py",
+            "python", "dl_test.py",
             "--dataset_name", dataset,
             "--batch_size", str(args.batch_size),
             "--skip_ac",            # 写死: 始终跳过算术编码
             "--no_save_images"      # 写死: 始终不保存图像
         ]
-        
-        # 添加可选的原始尺寸参数
-        if args.keep_original_size:
-            cmd.append("--keep_original_size")
         
         # 如果指定了单GPU模式，添加参数
         if args.single_gpu:
@@ -65,6 +60,14 @@ def run_tests(args):
         # 如果指定了模型路径，添加参数
         if args.model:
             cmd.extend(["--model", args.model])
+            
+        # 如果指定了LoRA路径，添加参数
+        if args.lora_path:
+            cmd.extend(["--lora_path", args.lora_path])
+            
+        # 如果指定了GPT2模型目录，添加参数
+        if args.gpt2_model_dir:
+            cmd.extend(["--gpt2_model_dir", args.gpt2_model_dir])
         
         # 打印运行的命令
         print(f"执行命令: {' '.join(cmd)}\n")
@@ -96,14 +99,20 @@ def run_tests(args):
         # 尝试从输出中提取重要信息
         theor_bpp_pattern = r"Overall Theoretical Dataset BPP: (\d+\.\d+)"
         avg_bpp_pattern = r"Average Model-Estimated BPP: (\d+\.\d+)"
+        avg_bpp_pattern2 = r"平均 BPP: (\d+\.\d+)"
         image_count_pattern = r"Found (\d+) images"
+        image_count_pattern2 = r"找到 (\d+) 个图像"
         
         # 首先尝试找Overall值，如果找不到，再尝试找Average值
         theor_bpp_match = re.search(theor_bpp_pattern, full_output)
         if not theor_bpp_match:
             theor_bpp_match = re.search(avg_bpp_pattern, full_output)
+        if not theor_bpp_match:
+            theor_bpp_match = re.search(avg_bpp_pattern2, full_output)
         
         image_count_match = re.search(image_count_pattern, full_output)
+        if not image_count_match:
+            image_count_match = re.search(image_count_pattern2, full_output)
         
         # 确保获取到了值
         theor_bpp = float(theor_bpp_match.group(1)) if theor_bpp_match else 0.0
@@ -112,8 +121,7 @@ def run_tests(args):
         # 如果我们仍然没有找到BPP，尝试在CSV文件中查找
         if theor_bpp == 0.0:
             csv_files = [
-                f"./distilled_results/distilled_{dataset}_metrics.csv",
-                f"./distilled_results/distilled_{dataset}_bpp_{str(theor_bpp).replace('.', '_')}.csv"
+                f"./gpt2_lora_results/lora_{dataset}_metrics.csv"
             ]
             for csv_file in csv_files:
                 if os.path.exists(csv_file):
@@ -150,17 +158,19 @@ def run_tests(args):
     print(f"CSV结果已保存到: {results_csv}")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='运行蒸馏模型图像压缩测试')
-    parser.add_argument('--keep-original-size', action='store_true',
-                        help='保持原始图像尺寸')
-    parser.add_argument('--batch-size', type=int, default=16,
+    parser = argparse.ArgumentParser(description='运行GPT2 LoRA模型图像压缩测试')
+    parser.add_argument('--batch-size', type=int, default=32,
                         help='批处理大小')
     parser.add_argument('--single-gpu', action='store_true',
                         help='仅使用单个GPU进行测试(避免内存问题)')
-    parser.add_argument('--output', type=str, default="distill_bpp_results.txt",
+    parser.add_argument('--output', type=str, default="dl_bpp_results.txt",
                         help='结果输出文件路径')
     parser.add_argument('--model', type=str, default=None,
-                        help='蒸馏模型路径，不指定则使用默认路径')
+                        help='蒸馏基础模型路径，不指定则使用默认路径')
+    parser.add_argument('--lora-path', type=str, default=None,
+                        help='LoRA权重路径，不指定则使用默认路径')
+    parser.add_argument('--gpt2-model-dir', type=str, default=None,
+                        help='GPT2模型目录路径，不指定则使用默认路径')
     
     args = parser.parse_args()
     run_tests(args)

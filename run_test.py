@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# filepath: /home/steven/code/llama_compression/run_distill_bpp_tests.py
+# filepath: /home/steven/code/llama_compression/run_test.py
 import subprocess
 import re
 import os
@@ -15,21 +15,21 @@ def run_tests(args):
     # 结果保存路径 
     results_file = args.output
     results_csv = results_file.replace(".txt", ".csv")
+    lora_mode = args.lora_mode
     
     # 写死参数: 始终跳过算术编码和不保存图像
     skip_ac = True
     no_save_images = True
     
-    print(f"开始测试: 蒸馏模型测试")
+    print(f"开始测试: {'LoRA' if lora_mode else '标准'}模式")
     print(f"使用固定参数: --skip_ac --no_save_images {'--keep_original_size' if args.keep_original_size else ''}")
-    print(f"批处理大小: {args.batch_size}")
     print(f"结果将保存到: {results_file}")
     
     # 清空或创建结果文件
     with open(results_file, "w") as f:
-        f.write(f"# Distilled Model BPP Test Results - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write(f"# Image Compression Test Results - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
         f.write(f"# 参数: --skip_ac --no_save_images {'--keep_original_size' if args.keep_original_size else ''}\n")
-        f.write(f"# 批处理大小: {args.batch_size}\n\n")
+        f.write(f"# {'LoRA' if lora_mode else '标准'}模式\n\n")
         f.write("Dataset            | Theoretical BPP | Images  \n")
         f.write("-------------------|----------------|--------\n")
     
@@ -45,26 +45,23 @@ def run_tests(args):
         print(f"测试数据集: {dataset}")
         print(f"{'='*60}\n")
         
-        # 准备命令
-        cmd = [
-            "python", "distillation_test.py",
+        # 准备基础命令
+        if lora_mode:
+            base_cmd = ["python", "lora_test.py"]
+        else:
+            base_cmd = ["python", "test.py"]
+        
+        # 添加命令行参数 (写死部分参数)
+        cmd = base_cmd + [
             "--dataset_name", dataset,
             "--batch_size", str(args.batch_size),
             "--skip_ac",            # 写死: 始终跳过算术编码
             "--no_save_images"      # 写死: 始终不保存图像
         ]
         
-        # 添加可选的原始尺寸参数
+        # 添加可选参数
         if args.keep_original_size:
             cmd.append("--keep_original_size")
-        
-        # 如果指定了单GPU模式，添加参数
-        if args.single_gpu:
-            cmd.append("--single_gpu")
-            
-        # 如果指定了模型路径，添加参数
-        if args.model:
-            cmd.extend(["--model", args.model])
         
         # 打印运行的命令
         print(f"执行命令: {' '.join(cmd)}\n")
@@ -93,44 +90,17 @@ def run_tests(args):
         if return_code != 0:
             print(f"\n警告: 命令执行返回代码 {return_code}")
         
-        # 尝试从输出中提取重要信息
+        # 提取重要信息
         theor_bpp_pattern = r"Overall Theoretical Dataset BPP: (\d+\.\d+)"
-        avg_bpp_pattern = r"Average Model-Estimated BPP: (\d+\.\d+)"
         image_count_pattern = r"Found (\d+) images"
         
-        # 首先尝试找Overall值，如果找不到，再尝试找Average值
+        # 提取值
         theor_bpp_match = re.search(theor_bpp_pattern, full_output)
-        if not theor_bpp_match:
-            theor_bpp_match = re.search(avg_bpp_pattern, full_output)
-        
         image_count_match = re.search(image_count_pattern, full_output)
         
         # 确保获取到了值
         theor_bpp = float(theor_bpp_match.group(1)) if theor_bpp_match else 0.0
         image_count = int(image_count_match.group(1)) if image_count_match else 0
-        
-        # 如果我们仍然没有找到BPP，尝试在CSV文件中查找
-        if theor_bpp == 0.0:
-            csv_files = [
-                f"./distilled_results/distilled_{dataset}_metrics.csv",
-                f"./distilled_results/distilled_{dataset}_bpp_{str(theor_bpp).replace('.', '_')}.csv"
-            ]
-            for csv_file in csv_files:
-                if os.path.exists(csv_file):
-                    print(f"从CSV文件获取BPP: {csv_file}")
-                    with open(csv_file, 'r') as f:
-                        csv_content = f.read()
-                        # 提取Model BPP列的值，假设是CSV的第3列
-                        model_bpp_pattern = r'\d+,[^,]*,([0-9.]+)'
-                        model_bpps = re.findall(model_bpp_pattern, csv_content)
-                        
-                        if model_bpps:
-                            # 计算平均值
-                            theor_bpp = sum(float(bpp) for bpp in model_bpps) / len(model_bpps)
-                            if image_count == 0:
-                                image_count = len(model_bpps)
-                            print(f"从CSV计算得到平均BPP: {theor_bpp:.4f}")
-                            break
         
         # 保存结果到TXT
         with open(results_file, "a") as f:
@@ -143,24 +113,22 @@ def run_tests(args):
         
         print(f"\n数据集 {dataset} 测试完成")
         print(f"理论 BPP: {theor_bpp:.4f}")
-        print(f"图像数量: {image_count}")
+        print(f"图像数: {image_count}")
 
     print(f"\n所有测试完成！")
     print(f"结果已保存到: {results_file}")
     print(f"CSV结果已保存到: {results_csv}")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='运行蒸馏模型图像压缩测试')
+    parser = argparse.ArgumentParser(description='运行图像压缩测试')
     parser.add_argument('--keep-original-size', action='store_true',
                         help='保持原始图像尺寸')
-    parser.add_argument('--batch-size', type=int, default=16,
+    parser.add_argument('--batch-size', type=int, default=8,
                         help='批处理大小')
-    parser.add_argument('--single-gpu', action='store_true',
-                        help='仅使用单个GPU进行测试(避免内存问题)')
-    parser.add_argument('--output', type=str, default="distill_bpp_results.txt",
+    parser.add_argument('--lora-mode', action='store_true',
+                        help='使用LoRA模型进行测试(默认使用标准模型)')
+    parser.add_argument('--output', type=str, default="compression_results.txt",
                         help='结果输出文件路径')
-    parser.add_argument('--model', type=str, default=None,
-                        help='蒸馏模型路径，不指定则使用默认路径')
     
     args = parser.parse_args()
     run_tests(args)

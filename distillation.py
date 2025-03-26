@@ -45,55 +45,82 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 class RobustImageDataset(Dataset):
-    """Dataset for knowledge distillation with robust handling"""
+    """Dataset for image compression fine-tuning with robust handling"""
     
-    def __init__(self, root_dir, size=256, patch_size=16):
+    def __init__(self, root_dir, patch_size=16, transform=None):
         super().__init__()
         self.root_dir = root_dir
-        self.size = size
         self.patch_size = patch_size
         self._init_paths()
         
-        self.transform = T.Compose([
-            T.Resize((size, size)),
-            T.ToTensor(),
-            T.Lambda(lambda x: x * 255)  # Scale to [0, 255]
-        ])
+        # Default transform if none provided - 移除 Resize 操作
+        if transform is None:
+            self.transform = T.Compose([
+                T.ToTensor(),
+                T.Lambda(lambda x: x * 255)  # Scale to [0, 255]
+            ])
+        else:
+            self.transform = transform
             
     def _init_paths(self):
         """Initialize image paths"""
         self.paths = sorted(glob.glob(os.path.join(self.root_dir, "*.jpg")))
-        logger.info(f"Found {len(self.paths)} image files")
+        logger.info(f"找到 {len(self.paths)} 个图像文件")
 
     def __len__(self):
         return len(self.paths)
         
-    def random_patchify(self, img_tensor, num_patches=1):
-        """Extract random patches from image"""
+    def random_patchify(self, img_tensor):
+        """从图像中随机提取patch，处理不同尺寸图像"""
         import random
         c, h, w = img_tensor.shape
-        patches = []
-        for _ in range(num_patches):
-            top = random.randint(0, h - self.patch_size)
-            left = random.randint(0, w - self.patch_size)
-            patch = img_tensor[:, top:top+self.patch_size, left:left+self.patch_size]
-            patches.append(patch)
-        return torch.stack(patches, dim=0)
+        
+        # 检查图像是否足够大能提取patch
+        if h < self.patch_size or w < self.patch_size:
+            # 如果图像太小，填充到最小尺寸
+            logger.warning(f"图像尺寸太小 ({h}x{w})，添加填充至最小尺寸")
+            padder = nn.ZeroPad2d((0, max(0, self.patch_size - w), 0, max(0, self.patch_size - h)))
+            img_tensor = padder(img_tensor)
+            # 更新尺寸
+            c, h, w = img_tensor.shape
+        
+        # 随机选择起始位置
+        top = random.randint(0, h - self.patch_size)
+        left = random.randint(0, w - self.patch_size)
+        
+        # 提取patch
+        patch = img_tensor[:, top:top+self.patch_size, left:left+self.patch_size]
+        return patch
         
     def __getitem__(self, idx):
         """Get image and prepare for training"""
         path = self.paths[idx]
         try:
-            # Load and transform image
+            # Load and transform image - 不改变尺寸
             img = Image.open(path).convert("RGB")
-            img_tensor = self.transform(img)
+            img_tensor = self.transform(img)  # 直接转换，不调整大小
             
-            # Extract random patches
-            patches = self.random_patchify(img_tensor, num_patches=1)
-            return patches
+            # 随机提取patch
+            patch = self.random_patchify(img_tensor)
+            
+            # 将pixel转换为整数，并准备为序列
+            pixel_values = patch.long().clamp(0, 255)
+            b, h, w = pixel_values.shape
+            seq_len = b * h * w
+            pixel_ids = pixel_values.reshape(seq_len)
+            
+            # 为自回归预测准备输入和标签
+            input_ids = pixel_ids[:-1]  # 除最后一个像素外的所有像素
+            labels = pixel_ids[1:]      # 除第一个像素外的所有像素
+            
+            return {
+                "input_ids": input_ids, 
+                "labels": labels,
+                "pixel_values": pixel_values,
+            }
         except Exception as e:
-            logger.warning(f"Error loading image {path}: {str(e)}, skipping...")
-            # On error, use next image
+            logger.warning(f"加载图像 {path} 出错: {str(e)}，跳过...")
+            # 出错时使用下一个图像代替
             return self[(idx + 1) % len(self)]
 
 
@@ -170,6 +197,7 @@ class DistillationTrainer:
         # Training state
         self.global_step = 0
         self.best_loss = float("inf")
+        self.best_ce_loss = float("inf")
         self.start_epoch = 0
         
         # Resume from checkpoint if specified
@@ -259,7 +287,6 @@ class DistillationTrainer:
         # Create training dataset
         self.train_dataset = RobustImageDataset(
             root_dir=self.args.train_dataset,
-            size=256,
             patch_size=16
         )
         
@@ -653,10 +680,10 @@ class DistillationTrainer:
             # 使用更激进的衰减曲线
             if progress < 0.4:
                 # 前40%缓慢降低
-                current_alpha = alpha * (1.0 - progress * 0.4)  # 更大的系数
+                current_alpha = alpha * (1.0 - progress * 0.4)
             else:
                 # 后60%快速降低至更小值
-                current_alpha = alpha * max(0.1, 1.0 - 0.2 - (progress-0.4) * 1.5)  # 降至原始alpha的10%
+                current_alpha = alpha * max(0.1, 1.0 - 0.2 - (progress-0.4) * 1.5)
             
             # 第3阶段
             if self.args.use_progressive_training:
@@ -674,16 +701,20 @@ class DistillationTrainer:
         else:
             current_alpha = alpha
                     
+        # 如果处于CE阶段，直接将alpha设为0（忽略教师模型）
+        if hasattr(self, 'in_ce_phase') and self.in_ce_phase:
+            current_alpha = 0.0
+                    
         # 组合损失
         total_loss = (current_alpha * soft_targets_loss) + ((1 - current_alpha) * hard_targets_loss)
         
-            
         # 只在主进程记录日志，并使用synchronize_step=False避免步数检查
         if self.global_step % 50 == 0 and self.accelerator.is_main_process:
             logger.info(f"Step {self.global_step}: "
                     f"Total Loss={total_loss.item():.4f}, "
                     f"KL Loss={soft_targets_loss.item():.4f}, "
-                    f"CE Loss={hard_targets_loss.item():.4f}")
+                    f"CE Loss={hard_targets_loss.item():.4f}, "
+                    f"Alpha={current_alpha:.4f}")
             
             # 添加logits范围检查，帮助分析问题
             t_min, t_max = teacher_logits.min().item(), teacher_logits.max().item()
@@ -696,12 +727,86 @@ class DistillationTrainer:
                     "soft_loss": soft_targets_loss.item(),
                     "hard_loss": hard_targets_loss.item(),
                     "total_loss": total_loss.item(),
+                    "current_alpha": current_alpha,
                     "teacher_logits_range": [t_min, t_max],
                     "student_logits_range": [s_min, s_max],
                 }, step=self.global_step, commit=True)
         
         return total_loss
+
+    def train_ce_phase(self):
+        """
+        在常规蒸馏后添加纯 CE Loss 训练阶段
+        """
+        logger.info("Starting CE Loss optimization phase...")
         
+        # 保存当前的 alpha 值（用于蒸馏权重）
+        original_alpha = self.args.alpha
+        self.args.alpha = 0.0  # 将 alpha 设为 0 仅使用 CE loss
+        
+        # 可选：降低学习率进行微调
+        for param_group in self.optimizer.param_groups:
+            param_group['lr'] = param_group['lr'] * 0.2
+            
+        # 重置学习率调度器
+        total_steps = len(self.train_dataloader) * self.args.ce_phase_epochs
+        self.lr_scheduler = torch.optim.lr_scheduler.OneCycleLR(
+            self.optimizer,
+            max_lr=[g["lr"] for g in self.optimizer.param_groups],
+            total_steps=total_steps,
+            pct_start=0.05,  # 短预热
+            anneal_strategy='cos',
+            div_factor=10.0,  # 更低的初始lr以平滑过渡
+            final_div_factor=10000.0
+        )
+        
+        # 准备调度器
+        self.lr_scheduler = self.accelerator.prepare(self.lr_scheduler)
+        
+        # 进行 CE phase 训练
+        ce_phase_losses = []
+        start_epoch = self.args.num_epochs  # 从常规蒸馏结束处开始
+        
+        for epoch in range(start_epoch, start_epoch + self.args.ce_phase_epochs):
+            logger.info(f"CE Phase Epoch {epoch+1}/{start_epoch + self.args.ce_phase_epochs} (Overall: {epoch+1})")
+            
+            # 训练一个 epoch
+            train_loss = self._train_epoch(epoch)
+            ce_phase_losses.append(train_loss)
+            
+            # 记录指标
+            logger.info(f"CE Phase Epoch {epoch+1}: Train Loss = {train_loss:.4f}")
+            
+            # 记录到 wandb
+            if self.args.use_wandb and self.accelerator.is_main_process:
+                wandb.log({
+                    "epoch": epoch + 1,
+                    "ce_phase_epoch": epoch - start_epoch + 1,
+                    "epoch_loss": train_loss,
+                    "ce_phase_loss": train_loss,
+                    "learning_rate": self.optimizer.param_groups[0]['lr'],
+                    "phase": "ce_only"
+                })
+            
+            # 保存检查点
+            if train_loss < self.best_ce_loss:
+                self.best_ce_loss = train_loss
+                self._save_checkpoint("best_ce_model", epoch)
+                logger.info(f"New best CE model saved, loss: {train_loss:.4f}")
+            
+            # 固定间隔保存检查点
+            self._save_checkpoint(f"checkpoint_epoch_{epoch+1}", epoch)
+        
+        # 恢复原始 alpha 值
+        self.args.alpha = original_alpha
+        
+        # 最终保存
+        self._save_checkpoint("final_ce_model", start_epoch + self.args.ce_phase_epochs - 1)
+        
+        logger.info(f"CE phase training complete. Best CE loss: {self.best_ce_loss:.4f}")
+        
+        return self.best_ce_loss
+
     def train(self):
         """Run full training loop"""
         logger.info("Starting training loop...")
@@ -740,23 +845,36 @@ class DistillationTrainer:
             # Always save latest checkpoint
             self._save_checkpoint(f"checkpoint_epoch_{epoch+1}", epoch)
             
-        logger.info(f"Training complete. Best loss: {self.best_loss:.4f}")
+        # 保存蒸馏阶段的最终模型
+        self._save_checkpoint("final_distillation_model", self.args.num_epochs-1)
+        logger.info(f"Distillation phase complete. Best loss: {self.best_loss:.4f}")
         
-        # Final save
-        self._save_checkpoint("final_model", self.args.num_epochs-1)
+        # 如果启用了CE阶段，继续进行
+        if self.args.use_ce_phase:
+            ce_loss = self.train_ce_phase()
+            logger.info(f"CE phase complete. Best CE loss: {ce_loss:.4f}")
         
         # End wandb run
         if self.args.use_wandb and self.accelerator.is_main_process:
             # Log final results
-            wandb.log({"best_loss": self.best_loss})
-            # Upload final model
+            wandb.log({
+                "best_distillation_loss": self.best_loss,
+                "best_ce_loss": self.best_ce_loss if hasattr(self, 'best_ce_loss') else None
+            })
+            # Upload final models
             artifact = wandb.Artifact(f"final_distilled_model", type="model")
-            artifact.add_dir(os.path.join(self.args.output_dir, "final_model"))
+            artifact.add_dir(os.path.join(self.args.output_dir, "final_distillation_model"))
             wandb.log_artifact(artifact)
+            
+            if self.args.use_ce_phase:
+                artifact = wandb.Artifact(f"final_ce_model", type="model")
+                artifact.add_dir(os.path.join(self.args.output_dir, "final_ce_model"))
+                wandb.log_artifact(artifact)
+                
             # End tracking
             self.accelerator.end_training()
         
-        return self.best_loss
+        return self.best_loss, getattr(self, 'best_ce_loss', None)
     
     def _train_epoch(self, epoch):
         """Train for one epoch with gradient accumulation"""
@@ -774,27 +892,27 @@ class DistillationTrainer:
         self.optimizer.zero_grad()
         accumulated_steps = 0
         
-        for step, patches in enumerate(pbar):
-            # Ensure batch is on correct device
-            batch_patches = patches.to(self.device, non_blocking=True)
-            b, n, c, h, w = batch_patches.shape
-            input_patches = batch_patches.view(b*n, c, h, w)
+        for step, batch in enumerate(pbar):
+            # 将batch移动到正确的设备上 - 类似于lora.py中的处理方式
+            batch = {k: v.to(self.device, non_blocking=True) for k, v in batch.items()}
+            
+            # 从batch中获取pixel_values (形状应该是 [B, 3, H, W])
+            pixel_values = batch["pixel_values"]
             
             # Forward pass through teacher model (no gradients)
             with torch.no_grad():
-                teacher_logits, _ = self.teacher_model(input_patches, None)
+                teacher_logits, _ = self.teacher_model(pixel_values, None)
             
             # Forward pass through student model
             with self.accelerator.autocast():
-                student_logits, _ = self.student_model(input_patches, None)
+                student_logits, _ = self.student_model(pixel_values, None)
                 
-                # Get pixel IDs for hard targets
-                pixel_ids = input_patches.long().clamp(0, 255).view(b*n, c*h*w)
+                # 从batch中获取标签
+                shifted_targets = batch["labels"]
                 
-                # Shift for autoregressive prediction
+                # Shift logits for autoregressive prediction
                 shifted_teacher_logits = teacher_logits[:, :-1].contiguous()
                 shifted_student_logits = student_logits[:, :-1].contiguous()
-                shifted_targets = pixel_ids[:, 1:].contiguous()
                 
                 # Calculate distillation loss
                 loss = self.kd_loss_fn(
@@ -869,7 +987,6 @@ class DistillationTrainer:
                         "avg_loss": avg_loss,
                         "gpu_memory": torch.cuda.max_memory_allocated() / 1e9 if torch.cuda.is_available() else 0
                     })
-            
         
         # Ensure all processes finish and loss values are consistent
         avg_loss = total_loss / len(self.train_dataloader)
@@ -935,15 +1052,15 @@ def get_args():
     parser.add_argument("--dynamic_temperature", action="store_true", default=True,
                     help="Dynamically decrease temperature during training")
     # Model paths
-    parser.add_argument("--teacher_model_path", type=str, default="/remote-home/wufeiyang/model_epoch_40.pth",
+    parser.add_argument("--teacher_model_path", type=str, default="/remote-home/wufeiyang/1_train/4_train_with_original_image/model_epoch_150.pth",
                     help="Path to teacher model checkpoint")
-    parser.add_argument("--llama_model_dir", type=str, default="/remote-home/wufeiyang/saved_model",
+    parser.add_argument("--llama_model_dir", type=str, default="/remote-home/wufeiyang/Llama_1B",
                     help="Path to LLaMA model configuration directory")
     parser.add_argument("--gpt2_model_dir", type=str, default="/remote-home/wufeiyang/gpt2_model",
                     help="Path to GPT2 model")
     parser.add_argument("--use_lora_teacher", action="store_true", default=True,
                 help="Use LoRA-enhanced teacher model")
-    parser.add_argument("--lora_path", type=str, default="/remote-home/wufeiyang/best_model",
+    parser.add_argument("--lora_path", type=str, default="/remote-home/wufeiyang/2_lora/4_lora_100_epoch/best_model",
                     help="Path to LoRA adapter weights")
     
     # Dataset parameters
@@ -955,7 +1072,7 @@ def get_args():
     # Training parameters
     parser.add_argument("--batch_size", type=int, default=24,
                     help="Training batch size per GPU")
-    parser.add_argument("--num_epochs", type=int, default=80,
+    parser.add_argument("--num_epochs", type=int, default=100,
                     help="Number of training epochs")
     parser.add_argument("--learning_rate", type=float, default=4e-5,
                     help="Peak learning rate")
@@ -1016,6 +1133,12 @@ def get_args():
                     help="Standardize logits (z-score) before distillation")
     parser.add_argument("--dynamic_alpha", action="store_true", default=True,
                     help="Dynamically decrease alpha during training")
+    
+    # CE优化阶段参数
+    parser.add_argument("--use_ce_phase", action="store_true", default=True,
+                        help="Add CE loss optimization phase after distillation")
+    parser.add_argument("--ce_phase_epochs", type=int, default=40,
+                        help="Number of epochs for CE loss optimization phase")
     
     return parser.parse_args()
 
